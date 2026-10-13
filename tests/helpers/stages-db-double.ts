@@ -62,6 +62,13 @@ export interface LeadRow {
   pipeline_id: string;
   organization_id: string;
   contact_id: string | null;
+  /**
+   * #2032 — a rota `win-rates` lê estes DOIS para medir a etapa ATUAL:
+   * `stage_changed_at` é o carimbo da 0071 e `created_at` é a reserva dele.
+   * Opcional aqui porque a maioria dos testes não mede tempo de etapa.
+   */
+  stage_changed_at?: string | null;
+  created_at?: string;
 }
 
 export function negocio(id: string, stageId: string, over: Partial<LeadRow> = {}): LeadRow {
@@ -84,6 +91,12 @@ export interface PipelineRow {
   description: string | null;
   position: number;
   is_default: boolean;
+  /**
+   * Marca de funil de clientes (migration 0262). Opcional: sem ela a linha é
+   * "não marcado", que é o estado de fábrica — e é o que a #2559 usa para provar
+   * que ARQUIVAR o funil marcado é recusado.
+   */
+  is_client_pipeline?: boolean;
   is_archived: boolean;
   organization_id: string;
 }

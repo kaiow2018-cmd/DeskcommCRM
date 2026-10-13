@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useT } from "@/hooks/i18n/useT";
+import { parseReaisToCents } from "@/lib/money";
 import {
   Dialog,
   DialogContent,
@@ -64,6 +65,8 @@ function inputHtmlParaTipo(tipo: string | undefined): string {
       return "date";
     case "number":
       return "number";
+    case "currency":
+      return "text";
     case "email":
       return "email";
     case "phone":
@@ -114,6 +117,7 @@ export function CamposObrigatoriosDialog({
     const valor = String(valores[campo.chave] ?? "").trim();
     if (valor.length === 0) return false;
     if (campo.tipo === "number" && Number.isNaN(Number(valor))) return false;
+    if (campo.tipo === "currency" && parseReaisToCents(valor.replace(/^R\$\s*/i, "")) === null) return false;
     if (campo.tipo === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(valor)) return false;
     if (campo.tipo === "url") {
       try {
@@ -152,6 +156,10 @@ export function CamposObrigatoriosDialog({
       const valor = String(bruto ?? "").trim();
       if (campo.tipo === "number") {
         customFields[campo.chave] = Number(valor);
+        continue;
+      }
+      if (campo.tipo === "currency") {
+        customFields[campo.chave] = (parseReaisToCents(valor.replace(/^R\$\s*/i, "")) ?? 0) / 100;
         continue;
       }
       if (campo.chave === CHAVE_DO_MOTIVO_DE_GANHO) {
@@ -259,6 +267,8 @@ export function CamposObrigatoriosDialog({
                 <Input
                   aria-label={nome}
                   type={inputHtmlParaTipo(campo.tipo)}
+                  inputMode={campo.tipo === "currency" ? "decimal" : undefined}
+                  placeholder={campo.tipo === "currency" ? "R$ 1.250,00" : undefined}
                   value={String(valores[campo.chave] ?? "")}
                   onChange={(e) => setValores((v) => ({ ...v, [campo.chave]: e.target.value }))}
                 />
