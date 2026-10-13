@@ -3,7 +3,6 @@
 import { useState, useRef } from "react";
 import { toast } from "sonner";
 import { useT } from "@/hooks/i18n/useT";
-import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { FileText, Image as ImageIcon, Upload, Trash2, ExternalLink, Loader2 } from "lucide-react";
 import type { LeadAttachment } from "@/app/api/v1/leads/[id]/attachments/route";
@@ -52,20 +51,17 @@ export function FileUploadCustomField({
   const t = useT();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   const files = parseFileList(value);
 
-  async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const selectedFiles = Array.from(e.target.files || []);
+  async function uploadFiles(selectedFiles: File[]) {
     if (selectedFiles.length === 0) return;
 
     if (!leadId) {
       toast.error(t("Salve o lead antes de anexar arquivos."));
       return;
     }
-
-    // Limpar input para permitir re-selecionar
-    e.target.value = "";
 
     setIsUploading(true);
     let currentList = [...files];
@@ -103,6 +99,40 @@ export function FileUploadCustomField({
     }
   }
 
+  function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const selectedFiles = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (selectedFiles.length > 0) {
+      void uploadFiles(selectedFiles);
+    }
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!disabled && !isUploading) {
+      setIsDragging(true);
+    }
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    if (disabled || isUploading) return;
+
+    const droppedFiles = Array.from(e.dataTransfer.files || []);
+    if (droppedFiles.length > 0) {
+      void uploadFiles(droppedFiles);
+    }
+  }
+
   async function handleRemove(attachmentId: string) {
     if (disabled || isUploading) return;
 
@@ -130,7 +160,17 @@ export function FileUploadCustomField({
   }
 
   return (
-    <div className="space-y-2 md:col-span-2 rounded-lg border border-border bg-card/40 p-3">
+    <div
+      onDragOver={handleDragOver}
+      onDragEnter={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`space-y-2 md:col-span-2 rounded-lg border p-3 transition-colors ${
+        isDragging
+          ? "border-primary bg-primary/10 ring-2 ring-primary/20"
+          : "border-border bg-card/40"
+      }`}
+    >
       <div className="flex items-center justify-between">
         <Label className="text-xs font-semibold text-text">
           {label}
@@ -194,7 +234,7 @@ export function FileUploadCustomField({
         </div>
       )}
 
-      {/* Botão de Upload */}
+      {/* Área de Drop & Botão de Upload */}
       {!disabled && (
         <div className="pt-1">
           <input
@@ -207,26 +247,36 @@ export function FileUploadCustomField({
             disabled={isUploading || disabled}
           />
 
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5 text-xs border-dashed w-full"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading || disabled}
+          <div
+            onClick={() => !isUploading && fileInputRef.current?.click()}
+            className={`flex flex-col items-center justify-center gap-1.5 rounded-md border border-dashed py-3 px-4 text-center cursor-pointer transition-colors ${
+              isDragging
+                ? "border-primary bg-primary/15 text-primary"
+                : "border-border/80 hover:border-primary/50 hover:bg-muted/40 text-text-muted"
+            } ${isUploading ? "opacity-60 cursor-not-allowed" : ""}`}
           >
             {isUploading ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                <span>{t("Enviando arquivo…")}</span>
-              </>
+              <div className="flex items-center gap-2 text-xs font-medium text-primary">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>{t("Enviando arquivo(s)…")}</span>
+              </div>
+            ) : isDragging ? (
+              <div className="flex items-center gap-2 text-xs font-semibold text-primary">
+                <Upload className="h-4 w-4 animate-bounce" />
+                <span>{t("Solte os arquivos aqui para enviar")}</span>
+              </div>
             ) : (
-              <>
-                <Upload className="h-3.5 w-3.5 text-text-muted" />
-                <span>{t("Adicionar PDF ou imagem")}</span>
-              </>
+              <div className="flex flex-col items-center gap-1">
+                <div className="flex items-center gap-1.5 text-xs font-medium text-text">
+                  <Upload className="h-3.5 w-3.5 text-text-muted" />
+                  <span>{t("Arraste arquivos aqui ou clique para selecionar")}</span>
+                </div>
+                <span className="text-[10px] text-text-muted">
+                  {t("PDF, PNG, JPG ou WebP (até 50 MB)")}
+                </span>
+              </div>
             )}
-          </Button>
+          </div>
         </div>
       )}
     </div>
