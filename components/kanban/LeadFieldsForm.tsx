@@ -109,7 +109,11 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
       description: values.description.trim() ? values.description.trim() : null,
       value_cents: valueCents,
       tags,
-      expected_close_date: values.expected_close_date || null,
+      expected_close_date:
+        values.expected_close_date ||
+        (customFields["data_ida"] as string) ||
+        (customFields["data_venda"] as string) ||
+        null,
       // Só o que a pessoa alterou (issue #2132) — o merge continua do servidor.
       ...(fieldDefs.length > 0
         ? { custom_fields: soChavesAlteradas(camposCarregados, customFields) }
@@ -139,6 +143,10 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
   }
 
 
+  const hasCustomDateFields = fieldDefs.some(
+    (f) => f.type === "date" || f.key.startsWith("data_"),
+  );
+
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
         <div className="space-y-2">
@@ -154,7 +162,7 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
           <Textarea id="description" rows={3} {...form.register("description")} />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className={`grid gap-3 ${hasCustomDateFields ? "grid-cols-1" : "grid-cols-2"}`}>
           <div className="space-y-2">
             {/* O rótulo segue a moeda do NEGÓCIO (a organização é a reserva):
                   `R$` em duro mentia para quem opera em euro. */}
@@ -172,14 +180,16 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
               </p>
             )}
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="expected_close_date">{t("Fechamento previsto")}</Label>
-            <Input
-              id="expected_close_date"
-              type="date"
-              {...form.register("expected_close_date")}
-            />
-          </div>
+          {!hasCustomDateFields && (
+            <div className="space-y-2">
+              <Label htmlFor="expected_close_date">{t("Fechamento previsto")}</Label>
+              <Input
+                id="expected_close_date"
+                type="date"
+                {...form.register("expected_close_date")}
+              />
+            </div>
+          )}
         </div>
 
         <div className="space-y-2">
