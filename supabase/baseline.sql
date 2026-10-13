@@ -54413,3 +54413,12 @@ on conflict (model) do update set
   completion_cents_per_million_tokens = excluded.completion_cents_per_million_tokens,
   notes = excluded.notes,
   superseded_at = null;
+
+-- ---- indice parcial para drain de event_log e contacts (migration 0655) ----
+create index if not exists idx_event_log_pending_drain
+on public.event_log (event_type, created_at)
+where status = 'pending';
+
+create index if not exists idx_contacts_org_created
+on public.contacts (organization_id, created_at desc);
+
