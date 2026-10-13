@@ -19,6 +19,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useT } from "@/hooks/i18n/useT";
 import { cn } from "@/lib/utils";
+import { FileUploadCustomField } from "@/components/kanban/FileUploadCustomField";
 
 export type CustomFieldType =
   | "text"
@@ -30,7 +31,8 @@ export type CustomFieldType =
   | "boolean"
   | "email"
   | "phone"
-  | "url";
+  | "url"
+  | "file";
 
 export interface CustomFieldDef {
   key: string;
@@ -45,11 +47,12 @@ interface Props {
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
   mode: "lead" | "contact";
+  leadId?: string;
   disabled?: boolean;
   className?: string;
 }
 
-export function CustomFieldsEditor({ fields, value, onChange, disabled, className }: Props) {
+export function CustomFieldsEditor({ fields, value, onChange, mode: _mode, leadId, disabled, className }: Props) {
   const t = useT();
   // O campo é do mesmo caminho do contato: o exemplo segue o país da
   // organização, e não o DDI brasileiro em duro.
@@ -215,6 +218,19 @@ export function CustomFieldsEditor({ fields, value, onChange, disabled, classNam
                   disabled={disabled}
                 />
               </div>
+            );
+          case "file":
+            return (
+              <FileUploadCustomField
+                key={f.key}
+                fieldKey={f.key}
+                label={f.label}
+                required={f.required}
+                leadId={leadId}
+                value={v}
+                onChange={(files) => set(f.key, files)}
+                disabled={disabled}
+              />
             );
           case "text":
           default:
