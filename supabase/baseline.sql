@@ -54422,3 +54422,41 @@ where status = 'pending';
 create index if not exists idx_contacts_org_created
 on public.contacts (organization_id, created_at desc);
 
+-- ---- tabela crm_lead_attachments e retencao de midia interna (migration 0656) ----
+create table if not exists public.crm_lead_attachments (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  lead_id uuid not null references public.crm_leads(id) on delete cascade,
+  field_key text not null,
+  file_name text not null,
+  file_size bigint not null default 0,
+  mime_type text not null default 'application/octet-stream',
+  storage_path text not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists crm_lead_attachments_org_lead_idx
+  on public.crm_lead_attachments(organization_id, lead_id);
+
+create index if not exists crm_lead_attachments_lead_field_idx
+  on public.crm_lead_attachments(lead_id, field_key);
+
+create index if not exists crm_lead_attachments_storage_path_idx
+  on public.crm_lead_attachments(storage_path);
+
+alter table public.crm_lead_attachments enable row level security;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename = 'crm_lead_attachments'
+      and policyname = 'crm_lead_attachments_tenant_isolate'
+  ) then
+    create policy crm_lead_attachments_tenant_isolate on public.crm_lead_attachments
+      for all using (organization_id in (select fn_user_org_ids()));
+  end if;
+end $$;
+

@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
+import { z } from "zod";
+
 import { requireSupportWrite } from "@/lib/impersonate/support";
 import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
+import { audit } from "@/lib/audit";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -12,7 +15,6 @@ export const dynamic = "force-dynamic";
 
 const BUCKET = "internal-media";
 const MAX_BYTES = 50 * 1024 * 1024; // 50 MB
-const SIGNED_URL_EXPIRES = 60 * 60 * 24 * 30; // 30 dias
 
 const ALLOWED_MIMES = new Set([
   "application/pdf",
@@ -33,11 +35,91 @@ export interface LeadAttachment {
   size: number;
   type: string;
   url: string;
-  uploaded_at: string;
+  created_at?: string;
+  uploaded_at?: string;
 }
+
+const PostSchema = z.object({
+  field_key: z
+    .string()
+    .trim()
+    .min(1, "field_key não pode ser vazio.")
+    .max(100, "field_key muito longo."),
+});
+
+const DeleteSchema = z.object({
+  field_key: z.string().trim().min(1, "field_key é obrigatório."),
+  attachment_id: z.string().uuid("attachment_id inválido."),
+});
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function serializarAnexo(row: {
+  id: string;
+  file_name: string;
+  storage_path: string;
+  file_size: number | string;
+  mime_type: string;
+  created_at: string;
+}, leadId: string): LeadAttachment {
+  return {
+    id: row.id,
+    name: row.file_name,
+    path: row.storage_path,
+    size: Number(row.file_size) || 0,
+    type: row.mime_type,
+    url: `/api/v1/leads/${leadId}/attachments/${row.id}/media`,
+    created_at: row.created_at,
+    uploaded_at: row.created_at,
+  };
+}
+
+export async function GET(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const requestId = randomUUID();
+  const authz = await requireRole("agent", { requestId, resource: "crm_leads" });
+  if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
+  const { id: leadId } = await ctx.params;
+  const orgId = authz.org.orgId;
+
+  const url = new URL(req.url);
+  const fieldKey = url.searchParams.get("field_key");
+
+  const supabase = await createClient();
+
+  // Verifica existência e posse do lead
+  const { data: lead, error: leadErr } = await supabase
+    .from("crm_leads")
+    .select("id")
+    .eq("id", leadId)
+    .eq("organization_id", orgId)
+    .maybeSingle();
+
+  if (leadErr || !lead) {
+    return fail("not_found", t("Lead não encontrado."), 404, { requestId });
+  }
+
+  let query = supabase
+    .from("crm_lead_attachments")
+    .select("id, file_name, storage_path, file_size, mime_type, created_at")
+    .eq("lead_id", leadId)
+    .eq("organization_id", orgId)
+    .order("created_at", { ascending: true });
+
+  if (fieldKey) {
+    query = query.eq("field_key", fieldKey);
+  }
+
+  const { data: rows, error: rowsErr } = await query;
+  if (rowsErr) {
+    logger.error("[leads/attachments] erro ao listar anexos", { error: rowsErr.message, requestId });
+    return fail("internal_error", t("Falha ao buscar anexos."), 500, { requestId });
+  }
+
+  const files = (rows ?? []).map((r) => serializarAnexo(r, leadId));
+  return ok({ files }, { requestId });
 }
 
 export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
@@ -57,14 +139,19 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   }
 
   const file = form.get("file");
-  const fieldKey = form.get("field_key");
+  const rawFieldKey = form.get("field_key");
+
+  const parsed = PostSchema.safeParse({ field_key: rawFieldKey });
+  if (!parsed.success) {
+    return fail("validation_failed", parsed.error.issues[0]?.message ?? t("Parâmetro inválido."), 422, {
+      requestId,
+    });
+  }
+
+  const { field_key: fieldKey } = parsed.data;
 
   if (!(file instanceof File)) {
     return fail("validation_failed", t("Arquivo não informado."), 422, { requestId });
-  }
-
-  if (typeof fieldKey !== "string" || !fieldKey.trim()) {
-    return fail("validation_failed", t("Campo ('field_key') não informado."), 422, { requestId });
   }
 
   if (file.size > MAX_BYTES) {
@@ -76,6 +163,18 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
       requestId,
       details: { mime: file.type },
     });
+  }
+
+  const supabase = await createClient();
+  const { data: lead, error: leadErr } = await supabase
+    .from("crm_leads")
+    .select("id")
+    .eq("id", leadId)
+    .eq("organization_id", orgId)
+    .maybeSingle();
+
+  if (leadErr || !lead) {
+    return fail("not_found", t("Lead não encontrado."), 404, { requestId });
   }
 
   const safeName = sanitizeFileName(file.name);
@@ -95,55 +194,57 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     return fail("internal_error", t("Falha ao salvar arquivo no armazenamento."), 500, { requestId });
   }
 
-  const { data: signedData, error: signedError } = await admin.storage
-    .from(BUCKET)
-    .createSignedUrl(storagePath, SIGNED_URL_EXPIRES);
+  // Grava na tabela crm_lead_attachments
+  const { data: inserted, error: insertError } = await supabase
+    .from("crm_lead_attachments")
+    .insert({
+      id: attachmentId,
+      organization_id: orgId,
+      lead_id: leadId,
+      field_key: fieldKey,
+      file_name: file.name,
+      file_size: file.size,
+      mime_type: file.type,
+      storage_path: storagePath,
+      created_by: authz.user.id,
+    })
+    .select("id, file_name, storage_path, file_size, mime_type, created_at")
+    .single();
 
-  const fileUrl = signedData?.signedUrl ?? "";
+  if (insertError || !inserted) {
+    logger.error("[leads/attachments] insert falhou", { detalhe: insertError?.message, requestId });
+    // Tenta limpar o arquivo enviado para não deixar lixo no Storage
+    await admin.storage.from(BUCKET).remove([storagePath]).catch(() => null);
+    return fail("internal_error", t("Falha ao registrar anexo no banco de dados."), 500, { requestId });
+  }
 
-  const attachment: LeadAttachment = {
-    id: attachmentId,
-    name: file.name,
-    path: storagePath,
-    size: file.size,
-    type: file.type,
-    url: fileUrl,
-    uploaded_at: new Date().toISOString(),
-  };
+  await audit({
+    action: "lead.attachment_uploaded",
+    resourceType: "crm_leads",
+    resourceId: leadId,
+    metadata: {
+      attachment_id: attachmentId,
+      field_key: fieldKey,
+      file_name: file.name,
+      file_size: file.size,
+      mime_type: file.type,
+    },
+    requestId,
+  });
 
-  // Atualizar custom_fields do lead no banco
-  const supabase = await createClient();
-  const { data: leadData, error: readLeadErr } = await supabase
-    .from("crm_leads")
-    .select("custom_fields")
-    .eq("id", leadId)
+  const attachment = serializarAnexo(inserted, leadId);
+
+  // Busca todos os arquivos deste campo para devolver a lista atualizada
+  const { data: allRows } = await supabase
+    .from("crm_lead_attachments")
+    .select("id, file_name, storage_path, file_size, mime_type, created_at")
+    .eq("lead_id", leadId)
     .eq("organization_id", orgId)
-    .maybeSingle();
+    .eq("field_key", fieldKey)
+    .order("created_at", { ascending: true });
 
-  if (readLeadErr || !leadData) {
-    return fail("not_found", t("Lead não encontrado."), 404, { requestId });
-  }
-
-  const customFields = (leadData.custom_fields as Record<string, unknown> | null) ?? {};
-  const currentFiles = Array.isArray(customFields[fieldKey])
-    ? (customFields[fieldKey] as LeadAttachment[])
-    : [];
-
-  const updatedFiles = [...currentFiles, attachment];
-  customFields[fieldKey] = updatedFiles;
-
-  const { error: updateErr } = await supabase
-    .from("crm_leads")
-    .update({ custom_fields: customFields })
-    .eq("id", leadId)
-    .eq("organization_id", orgId);
-
-  if (updateErr) {
-    logger.error("[leads/attachments] update custom_fields falhou", { detalhe: updateErr.message, requestId });
-    return fail("internal_error", t("Falha ao vincular arquivo ao negócio."), 500, { requestId });
-  }
-
-  return ok({ attachment, files: updatedFiles }, { status: 201, requestId });
+  const files = (allRows ?? []).map((r) => serializarAnexo(r, leadId));
+  return ok({ attachment, files }, { status: 201, requestId });
 }
 
 export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response> {
@@ -157,56 +258,79 @@ export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response>
   const { id: leadId } = await ctx.params;
   const orgId = authz.org.orgId;
 
-  let body: { field_key?: string; attachment_id?: string };
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return fail("invalid_request", t("Corpo JSON inválido."), 400, { requestId });
   }
 
-  const { field_key: fieldKey, attachment_id: attachmentId } = body;
-  if (!fieldKey || !attachmentId) {
-    return fail("validation_failed", t("field_key e attachment_id são obrigatórios."), 422, { requestId });
-  }
-
-  const supabase = await createClient();
-  const { data: leadData, error: readLeadErr } = await supabase
-    .from("crm_leads")
-    .select("custom_fields")
-    .eq("id", leadId)
-    .eq("organization_id", orgId)
-    .maybeSingle();
-
-  if (readLeadErr || !leadData) {
-    return fail("not_found", t("Lead não encontrado."), 404, { requestId });
-  }
-
-  const customFields = (leadData.custom_fields as Record<string, unknown> | null) ?? {};
-  const currentFiles = Array.isArray(customFields[fieldKey])
-    ? (customFields[fieldKey] as LeadAttachment[])
-    : [];
-
-  const target = currentFiles.find((f) => f.id === attachmentId);
-  const updatedFiles = currentFiles.filter((f) => f.id !== attachmentId);
-  customFields[fieldKey] = updatedFiles;
-
-  // Remover do Storage se encontrado
-  if (target?.path) {
-    const admin = createAdminClient();
-    await admin.storage.from(BUCKET).remove([target.path]).catch((e) => {
-      logger.warn("[leads/attachments] falha ao apagar do storage", { path: target.path, erro: e?.message });
+  const parsed = DeleteSchema.safeParse(body);
+  if (!parsed.success) {
+    return fail("validation_failed", parsed.error.issues[0]?.message ?? t("Parâmetros inválidos."), 422, {
+      requestId,
     });
   }
 
-  const { error: updateErr } = await supabase
-    .from("crm_leads")
-    .update({ custom_fields: customFields })
-    .eq("id", leadId)
-    .eq("organization_id", orgId);
+  const { field_key: fieldKey, attachment_id: attachmentId } = parsed.data;
 
-  if (updateErr) {
-    return fail("internal_error", t("Falha ao atualizar anexos."), 500, { requestId });
+  const supabase = await createClient();
+
+  // Busca o anexo existente
+  const { data: anexo, error: readErr } = await supabase
+    .from("crm_lead_attachments")
+    .select("id, storage_path, file_name")
+    .eq("id", attachmentId)
+    .eq("lead_id", leadId)
+    .eq("organization_id", orgId)
+    .maybeSingle();
+
+  if (readErr || !anexo) {
+    return fail("not_found", t("Anexo não encontrado."), 404, { requestId });
   }
 
-  return ok({ files: updatedFiles }, { requestId });
+  // Remove do Storage
+  const admin = createAdminClient();
+  if (anexo.storage_path) {
+    await admin.storage.from(BUCKET).remove([anexo.storage_path]).catch((e) => {
+      logger.warn("[leads/attachments] falha ao apagar do storage", { path: anexo.storage_path, erro: e?.message });
+    });
+  }
+
+  // Remove do banco
+  const { error: delErr } = await supabase
+    .from("crm_lead_attachments")
+    .delete()
+    .eq("id", attachmentId)
+    .eq("lead_id", leadId)
+    .eq("organization_id", orgId);
+
+  if (delErr) {
+    logger.error("[leads/attachments] delete falhou", { detalhe: delErr.message, requestId });
+    return fail("internal_error", t("Falha ao remover anexo."), 500, { requestId });
+  }
+
+  await audit({
+    action: "lead.attachment_deleted",
+    resourceType: "crm_leads",
+    resourceId: leadId,
+    metadata: {
+      attachment_id: attachmentId,
+      field_key: fieldKey,
+      file_name: anexo.file_name,
+    },
+    requestId,
+  });
+
+  // Retorna a lista restante
+  const { data: remainingRows } = await supabase
+    .from("crm_lead_attachments")
+    .select("id, file_name, storage_path, file_size, mime_type, created_at")
+    .eq("lead_id", leadId)
+    .eq("organization_id", orgId)
+    .eq("field_key", fieldKey)
+    .order("created_at", { ascending: true });
+
+  const files = (remainingRows ?? []).map((r) => serializarAnexo(r, leadId));
+  return ok({ files }, { requestId });
 }

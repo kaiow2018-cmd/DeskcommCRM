@@ -55,6 +55,8 @@ export const AUDIT_ACTIONS = [
   // N `lead.created`: "quem despejou 300 negócios neste funil, e quando" é a
   // pergunta que se faz depois, e ela não se responde contando linhas soltas.
   "lead.imported",
+  "lead.attachment_uploaded",
+  "lead.attachment_deleted",
   "contact.created",
   "contact.updated",
   "contacts.imported",

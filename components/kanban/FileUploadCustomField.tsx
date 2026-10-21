@@ -1,10 +1,25 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { toast } from "sonner";
 import { useT } from "@/hooks/i18n/useT";
 import { Label } from "@/components/ui/label";
-import { FileText, Image as ImageIcon, Upload, Trash2, ExternalLink, Loader2 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  FileText,
+  Image as ImageIcon,
+  Upload,
+  Trash2,
+  ExternalLink,
+  Loader2,
+  Eye,
+  Download,
+} from "lucide-react";
 import type { LeadAttachment } from "@/app/api/v1/leads/[id]/attachments/route";
 
 interface Props {
@@ -52,8 +67,35 @@ export function FileUploadCustomField({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [previewAttachment, setPreviewAttachment] = useState<LeadAttachment | null>(null);
 
   const files = parseFileList(value);
+
+  // Busca anexos persistidos na tabela crm_lead_attachments caso a lista inicial esteja vazia
+  useEffect(() => {
+    if (!leadId || files.length > 0) return;
+
+    let cancelado = false;
+    async function carregarAnexos() {
+      try {
+        const res = await fetch(
+          `/api/v1/leads/${leadId}/attachments?field_key=${encodeURIComponent(fieldKey)}`,
+        );
+        if (!res.ok) return;
+        const json = await res.json();
+        const lista = (json.data?.files ?? []) as LeadAttachment[];
+        if (!cancelado && lista.length > 0) {
+          onChange(lista);
+        }
+      } catch {
+        // Silencioso se não conseguir carregar no mount
+      }
+    }
+    void carregarAnexos();
+    return () => {
+      cancelado = true;
+    };
+  }, [leadId, fieldKey, files.length, onChange]);
 
   async function uploadFiles(selectedFiles: File[]) {
     if (selectedFiles.length === 0) return;
@@ -77,9 +119,10 @@ export function FileUploadCustomField({
           body: formData,
         });
 
-        const json = await res.json();
+        const json = await res.json().catch(() => ({}));
         if (!res.ok) {
-          throw new Error(json.message || t("Falha ao subir arquivo."));
+          const msg = json.error?.message || json.message || t("Falha ao subir arquivo.");
+          throw new Error(msg);
         }
 
         currentList = json.data?.files || [...currentList, json.data?.attachment];
@@ -89,7 +132,7 @@ export function FileUploadCustomField({
       toast.success(
         selectedFiles.length === 1
           ? t("Arquivo anexado com sucesso!")
-          : t(`${selectedFiles.length} arquivos anexados com sucesso!`),
+          : t("{n} arquivos anexados com sucesso!").replace("{n}", String(selectedFiles.length)),
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : t("Erro desconhecido");
@@ -143,9 +186,10 @@ export function FileUploadCustomField({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ field_key: fieldKey, attachment_id: attachmentId }),
         });
-        const json = await res.json();
+        const json = await res.json().catch(() => ({}));
         if (!res.ok) {
-          throw new Error(json.message || t("Falha ao remover arquivo."));
+          const msg = json.error?.message || json.message || t("Falha ao remover arquivo.");
+          throw new Error(msg);
         }
         onChange(json.data?.files || files.filter((f) => f.id !== attachmentId));
         toast.success(t("Arquivo removido."));
@@ -165,7 +209,7 @@ export function FileUploadCustomField({
       onDragEnter={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`space-y-2 md:col-span-2 rounded-lg border p-3 transition-colors ${
+      className={`space-y-2 md:col-span-2 rounded-md border p-3 transition-colors ${
         isDragging
           ? "border-primary bg-primary/10 ring-2 ring-primary/20"
           : "border-border bg-card/40"
@@ -186,10 +230,15 @@ export function FileUploadCustomField({
         <div className="space-y-1.5 pt-1">
           {files.map((file) => {
             const isImage = file.type?.startsWith("image/");
+            const isPdf = file.type === "application/pdf";
+            const fileUrl =
+              file.url ||
+              (leadId ? `/api/v1/leads/${leadId}/attachments/${file.id}/media` : "");
+
             return (
               <div
                 key={file.id}
-                className="flex items-center justify-between gap-2 rounded border border-border/80 bg-background/80 px-2.5 py-1.5 text-xs shadow-sm"
+                className="flex items-center justify-between gap-2 rounded-md border border-border/80 bg-background/80 px-2.5 py-1.5 text-xs shadow-sm"
               >
                 <div className="flex items-center gap-2 min-w-0">
                   {isImage ? (
@@ -206,22 +255,36 @@ export function FileUploadCustomField({
                 </div>
 
                 <div className="flex items-center gap-1 shrink-0">
-                  {file.url && (
+                  {/* Botão de Visualização / Preview em Modal (Prioridade 2) */}
+                  {(isPdf || isImage) && fileUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setPreviewAttachment({ ...file, url: fileUrl })}
+                      className="inline-flex items-center gap-1 rounded-md p-1 text-text-muted hover:text-primary hover:bg-muted"
+                      title={t("Visualizar documento")}
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+
+                  {/* Link Externo / Download Direto */}
+                  {fileUrl && (
                     <a
-                      href={file.url}
+                      href={fileUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded p-1 text-text-muted hover:text-text hover:bg-muted"
-                      title={t("Abrir / Baixar arquivo")}
+                      className="inline-flex items-center gap-1 rounded-md p-1 text-text-muted hover:text-text hover:bg-muted"
+                      title={t("Abrir em nova aba / Baixar")}
                     >
                       <ExternalLink className="h-3.5 w-3.5" />
                     </a>
                   )}
+
                   {!disabled && (
                     <button
                       type="button"
                       onClick={() => handleRemove(file.id)}
-                      className="rounded p-1 text-error-fg hover:bg-error-fg/10"
+                      className="rounded-md p-1 text-error-fg hover:bg-error-fg/10"
                       title={t("Remover arquivo")}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -279,6 +342,82 @@ export function FileUploadCustomField({
           </div>
         </div>
       )}
+
+      {/* Modal de Pré-Visualização de Documentos (PDF / Imagem) */}
+      <Dialog
+        open={!!previewAttachment}
+        onOpenChange={(aberto) => !aberto && setPreviewAttachment(null)}
+      >
+        <DialogContent className="max-w-4xl w-[95vw] max-h-[92vh] flex flex-col p-4 rounded-md">
+          <DialogHeader className="flex flex-row items-center justify-between pb-2 border-b border-border/80">
+            <div className="flex items-center gap-2 min-w-0 pr-4">
+              {previewAttachment?.type?.startsWith("image/") ? (
+                <ImageIcon className="h-4 w-4 shrink-0 text-sky-500" />
+              ) : (
+                <FileText className="h-4 w-4 shrink-0 text-amber-500" />
+              )}
+              <DialogTitle className="text-sm font-semibold truncate text-text">
+                {previewAttachment?.name}
+              </DialogTitle>
+              {previewAttachment?.size ? (
+                <span className="shrink-0 text-xs text-text-muted font-normal">
+                  ({formatBytes(previewAttachment.size)})
+                </span>
+              ) : null}
+            </div>
+
+            {previewAttachment?.url && (
+              <a
+                href={previewAttachment.url}
+                download={previewAttachment.name}
+                className="inline-flex items-center gap-1.5 text-xs font-medium rounded-md px-2.5 py-1.5 bg-muted hover:bg-muted/80 text-text transition-colors mr-6"
+                title={t("Baixar arquivo")}
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>{t("Baixar")}</span>
+              </a>
+            )}
+          </DialogHeader>
+
+          <div className="flex-1 w-full overflow-hidden flex items-center justify-center min-h-[50vh] pt-2">
+            {previewAttachment?.type?.startsWith("image/") ? (
+              <div className="flex items-center justify-center w-full h-full p-2 bg-muted/20 rounded-md overflow-auto">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={previewAttachment.url}
+                  alt={previewAttachment.name}
+                  className="max-h-[75vh] w-auto max-w-full object-contain rounded-md shadow-sm"
+                />
+              </div>
+            ) : previewAttachment?.type === "application/pdf" ? (
+              <div className="w-full h-[75vh] rounded-md overflow-hidden border border-border bg-muted/10">
+                <iframe
+                  src={previewAttachment.url}
+                  title={previewAttachment.name}
+                  className="w-full h-full border-0 rounded-md"
+                />
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-3 p-8 text-center text-text-muted">
+                <FileText className="h-12 w-12 text-muted-foreground/60" />
+                <p className="text-sm">
+                  {t("Pré-visualização indisponível para este formato.")}
+                </p>
+                {previewAttachment?.url && (
+                  <a
+                    href={previewAttachment.url}
+                    download={previewAttachment.name}
+                    className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 bg-primary text-primary-foreground text-xs font-medium shadow-sm hover:bg-primary/90"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>{t("Baixar arquivo para visualizar")}</span>
+                  </a>
+                )}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
