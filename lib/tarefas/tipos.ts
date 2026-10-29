@@ -21,6 +21,9 @@
  * por um `Record` de objetos deixaria o par cego.
  */
 
+/** Onde o aviso de tarefa leva: quem recebe é sempre o responsável. */
+export const HREF_MINHAS_TAREFAS = "/app/tasks?assigned_to=me";
+
 export const PRIORIDADES_DA_TAREFA = ["low", "medium", "high", "urgent"] as const;
 export type PrioridadeDaTarefa = (typeof PRIORIDADES_DA_TAREFA)[number];
 
@@ -45,6 +48,12 @@ export interface Tarefa {
   status: SituacaoDaTarefa;
   lead_id: string | null;
   contact_id: string | null;
+  /**
+   * A demanda de atendimento que originou o combinado (#2818). Nula = tarefa
+   * avulsa ou presa só a negócio/contato. É o vínculo que faz a tarefa criada de
+   * dentro do inbox voltar para a tela de quem precisa cumpri-la.
+   */
+  demanda_id: string | null;
   assigned_to: string | null;
   created_by: string | null;
   created_at: string;
@@ -65,6 +74,8 @@ export interface NovaTarefa {
   status?: SituacaoDaTarefa;
   lead_id?: string | null;
   contact_id?: string | null;
+  /** A demanda do atendimento a que a tarefa fica presa (#2818). */
+  demanda_id?: string | null;
   assigned_to?: string | null;
 }
 

@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useT } from "@/hooks/i18n/useT";
-import { parseReaisToCents } from "@/lib/money";
+import { useMoedaDaOrgAtiva } from "@/hooks/auth/AuthProvider";
+import { exemploDoCampoDeMoeda, lerCampoDeMoeda } from "@/lib/leads/campo-de-moeda";
+import { MOEDA_PADRAO } from "@/lib/money";
 import {
   Dialog,
   DialogContent,
@@ -86,7 +88,9 @@ export function CamposObrigatoriosDialog({
   isPending = false,
 }: CamposObrigatoriosDialogProps) {
   const t = useT();
-  const [valores, setValores] = useState<Record<string, unknown>>({});
+  // O campo de moeda na moeda da organização, não em real fixo.
+  const moeda = useMoedaDaOrgAtiva() ?? MOEDA_PADRAO;
+  const [valores, setValores] = useState<Record<string, string>>({});
 
   // Troca de recusa zera o formulário: um diálogo reaproveitado com os valores
   // do card anterior pediria ao operador para confirmar dados que não são dele.
@@ -100,24 +104,12 @@ export function CamposObrigatoriosDialog({
 
   const valido = campos.every((campo) => {
     if (campo.tipo === "boolean") return true;
-    if (campo.tipo === "file") {
-      const v = valores[campo.chave];
-      if (!v) return false;
-      if (Array.isArray(v)) return v.length > 0;
-      if (typeof v === "string") {
-        try {
-          const parsed = JSON.parse(v);
-          return Array.isArray(parsed) && parsed.length > 0;
-        } catch {
-          return false;
-        }
-      }
-      return false;
-    }
-    const valor = String(valores[campo.chave] ?? "").trim();
+    // Campo `file`: o valor aqui é só a CONTAGEM de anexos, para liberar o botão.
+    if (campo.tipo === "file") return Number(valores[campo.chave] ?? 0) > 0;
+    const valor = (valores[campo.chave] ?? "").trim();
     if (valor.length === 0) return false;
     if (campo.tipo === "number" && Number.isNaN(Number(valor))) return false;
-    if (campo.tipo === "currency" && parseReaisToCents(valor.replace(/^R\$\s*/i, "")) === null) return false;
+    if (campo.tipo === "currency" && lerCampoDeMoeda(valor, moeda) === null) return false;
     if (campo.tipo === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(valor)) return false;
     if (campo.tipo === "url") {
       try {
@@ -134,32 +126,21 @@ export function CamposObrigatoriosDialog({
     const customFields: Record<string, unknown> = {};
     let wonReason: string | undefined;
     for (const campo of campos) {
-      const bruto = valores[campo.chave];
+      const bruto = valores[campo.chave] ?? "";
+      const valor = bruto.trim();
+      // O anexo já foi gravado em `crm_lead_attachments` pelo upload, e é lá que
+      // o servidor confere; ele nunca vai em `custom_fields`.
+      if (campo.tipo === "file") continue;
       if (campo.tipo === "boolean") {
-        customFields[campo.chave] = bruto === "true" || bruto === true;
+        customFields[campo.chave] = bruto === "true";
         continue;
       }
-      if (campo.tipo === "file") {
-        if (Array.isArray(bruto)) {
-          customFields[campo.chave] = bruto;
-        } else if (typeof bruto === "string") {
-          try {
-            customFields[campo.chave] = JSON.parse(bruto);
-          } catch {
-            customFields[campo.chave] = [];
-          }
-        } else {
-          customFields[campo.chave] = [];
-        }
-        continue;
-      }
-      const valor = String(bruto ?? "").trim();
       if (campo.tipo === "number") {
         customFields[campo.chave] = Number(valor);
         continue;
       }
       if (campo.tipo === "currency") {
-        customFields[campo.chave] = (parseReaisToCents(valor.replace(/^R\$\s*/i, "")) ?? 0) / 100;
+        customFields[campo.chave] = (lerCampoDeMoeda(valor, moeda) ?? 0) / 100;
         continue;
       }
       if (campo.chave === CHAVE_DO_MOTIVO_DE_GANHO) {
@@ -210,29 +191,28 @@ export function CamposObrigatoriosDialog({
             }
             if (campo.tipo === "file") {
               return (
-                <div key={campo.chave} className="space-y-1">
-                  <FileUploadCustomField
-                    fieldKey={campo.chave}
-                    label={nome}
-                    required
-                    leadId={recusa.args.leadId}
-                    value={valores[campo.chave]}
-                    onChange={(files) =>
-                      setValores((v) => ({
-                        ...v,
-                        [campo.chave]: files,
-                      }))
-                    }
-                  />
-                </div>
+                <FileUploadCustomField
+                  key={campo.chave}
+                  fieldKey={campo.chave}
+                  label={nome}
+                  required
+                  leadId={recusa.args.leadId}
+                  onChange={(files) =>
+                    setValores((v) => ({ ...v, [campo.chave]: String(files.length) }))
+                  }
+                />
               );
             }
-            if (campo.tipo === "select" && campo.opcoes && campo.opcoes.length > 0) {
+            if (
+              (campo.tipo === "select" || campo.tipo === "searchable_select") &&
+              campo.opcoes &&
+              campo.opcoes.length > 0
+            ) {
               return (
                 <div key={campo.chave} className="space-y-1">
                   <Label className="text-xs">{rotuloCampo}</Label>
                   <Select
-                    value={String(valores[campo.chave] ?? "")}
+                    value={valores[campo.chave] ?? ""}
                     onValueChange={(valor) => setValores((v) => ({ ...v, [campo.chave]: valor }))}
                   >
                     <SelectTrigger aria-label={nome}>
@@ -255,7 +235,7 @@ export function CamposObrigatoriosDialog({
                   <Label className="text-xs">{rotuloCampo}</Label>
                   <Textarea
                     aria-label={nome}
-                    value={String(valores[campo.chave] ?? "")}
+                    value={valores[campo.chave] ?? ""}
                     onChange={(e) => setValores((v) => ({ ...v, [campo.chave]: e.target.value }))}
                   />
                 </div>
@@ -268,8 +248,8 @@ export function CamposObrigatoriosDialog({
                   aria-label={nome}
                   type={inputHtmlParaTipo(campo.tipo)}
                   inputMode={campo.tipo === "currency" ? "decimal" : undefined}
-                  placeholder={campo.tipo === "currency" ? "R$ 1.250,00" : undefined}
-                  value={String(valores[campo.chave] ?? "")}
+                  placeholder={campo.tipo === "currency" ? exemploDoCampoDeMoeda(moeda, 1250) : undefined}
+                  value={valores[campo.chave] ?? ""}
                   onChange={(e) => setValores((v) => ({ ...v, [campo.chave]: e.target.value }))}
                 />
               </div>

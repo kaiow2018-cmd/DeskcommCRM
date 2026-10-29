@@ -6,10 +6,15 @@ import { requireSupportWrite } from "@/lib/impersonate/support";
 import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { audit } from "@/lib/audit";
+import { settingsDoFunil } from "@/lib/leads/campos-exigidos";
+import { emitLeadActivity } from "@/lib/leads/activity-emitter";
+import { camposDoFunil, escopoDoCampo } from "@/lib/leads/campos-do-funil";
+import { customFieldSchema } from "@/lib/schemas/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { logger } from "@/lib/logger";
+import { isLeadAttachmentPathOwnedBy } from "@/lib/messaging/media/upload-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -39,12 +44,10 @@ export interface LeadAttachment {
   uploaded_at?: string;
 }
 
+// A MESMA régua da chave que o funil aceita ao cadastrar o campo: a chave entra
+// no caminho do objeto no Storage.
 const PostSchema = z.object({
-  field_key: z
-    .string()
-    .trim()
-    .min(1, "field_key não pode ser vazio.")
-    .max(100, "field_key muito longo."),
+  field_key: customFieldSchema.shape.key,
 });
 
 const DeleteSchema = z.object({
@@ -78,7 +81,10 @@ function serializarAnexo(row: {
 
 export async function GET(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const requestId = randomUUID();
-  const authz = await requireRole("agent", { requestId, resource: "crm_leads" });
+  // LER o anexo é ler o negócio (#3431): quem enxerga o lead enxerga o
+  // documento dele — o `viewer` inclusive. A escrita (POST/DELETE, abaixo)
+  // segue em `agent`: lista é leitura, upload e remoção não são.
+  const authz = await requireRole("viewer", { requestId, resource: "crm_leads" });
   if (!authz.ok) return authz.response;
   const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { id: leadId } = await ctx.params;
@@ -168,7 +174,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const supabase = await createClient();
   const { data: lead, error: leadErr } = await supabase
     .from("crm_leads")
-    .select("id")
+    .select("id, pipeline_id")
     .eq("id", leadId)
     .eq("organization_id", orgId)
     .maybeSingle();
@@ -177,10 +183,23 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     return fail("not_found", t("Lead não encontrado."), 404, { requestId });
   }
 
+  // Só se anexa a um campo `file` do NEGÓCIO que o funil deste lead declara.
+  const settings = await settingsDoFunil(supabase, lead.pipeline_id);
+  const campo = camposDoFunil(settings as Record<string, unknown> | null).find(
+    (c) => c.key === fieldKey,
+  );
+  if (!campo || campo.type !== "file" || escopoDoCampo(campo) !== "negocio") {
+    return fail("validation_failed", t("Este funil não tem um campo de arquivo com essa chave."), 422, {
+      requestId,
+    });
+  }
+
   const safeName = sanitizeFileName(file.name);
   const attachmentId = randomUUID();
   const ext = safeName.includes(".") ? safeName.split(".").pop() : "bin";
-  const storagePath = `${orgId}/leads/${leadId}/${fieldKey}/${attachmentId}.${ext}`;
+  // `lead.id` (do banco), não o parâmetro da URL: o banco confere o caminho
+  // contra `lead_id::text`, sempre minúsculo.
+  const storagePath = `${orgId}/leads/${lead.id}/${fieldKey}/${attachmentId}.${ext}`;
 
   const bytes = new Uint8Array(await file.arrayBuffer());
   const admin = createAdminClient();
@@ -232,6 +251,22 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     requestId,
   });
 
+  // A LINHA DO TEMPO (#3316): sem ela, o documento existe no card e some da
+  // história do negócio — quem abre o card uma semana depois não vê quando o
+  // voucher chegou nem que arquivo sustenta a proposta que a IA leu dele.
+  // Fire-and-forget como todo emissor: a timeline não derruba o upload que ela
+  // descreve. O payload é NOME e TIPO do arquivo — nunca o conteúdo.
+  void emitLeadActivity(supabase, {
+    organizationId: orgId,
+    leadId,
+    type: "document_attached",
+    sourceModule: "leads/attachments",
+    sourceId: attachmentId,
+    actor: { type: "user", id: authz.user.id },
+    reason: `Documento anexado ao campo ${campo.label ?? fieldKey}`,
+    payload: { field_key: fieldKey, file_name: file.name, mime_type: file.type },
+  }).catch(() => null);
+
   const attachment = serializarAnexo(inserted, leadId);
 
   // Busca todos os arquivos deste campo para devolver a lista atualizada
@@ -276,6 +311,18 @@ export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response>
 
   const supabase = await createClient();
 
+  // Mesmo portão do GET/POST/mídia: o negócio tem de ser visível para quem pede.
+  const { data: lead, error: leadErr } = await supabase
+    .from("crm_leads")
+    .select("id")
+    .eq("id", leadId)
+    .eq("organization_id", orgId)
+    .maybeSingle();
+
+  if (leadErr || !lead) {
+    return fail("not_found", t("Lead não encontrado."), 404, { requestId });
+  }
+
   // Busca o anexo existente
   const { data: anexo, error: readErr } = await supabase
     .from("crm_lead_attachments")
@@ -286,6 +333,11 @@ export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response>
     .maybeSingle();
 
   if (readErr || !anexo) {
+    return fail("not_found", t("Anexo não encontrado."), 404, { requestId });
+  }
+  // A remoção do arquivo é com o cliente admin: só sob o prefixo deste negócio.
+  if (anexo.storage_path && !isLeadAttachmentPathOwnedBy(anexo.storage_path, orgId, lead.id)) {
+    logger.warn("[leads/attachments] caminho fora do negócio; nada removido", { attachmentId, requestId });
     return fail("not_found", t("Anexo não encontrado."), 404, { requestId });
   }
 

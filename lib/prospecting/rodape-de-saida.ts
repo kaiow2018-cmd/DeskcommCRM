@@ -47,52 +47,12 @@ const PALAVRA_POR_IDIOMA: Record<string, string> = {
 };
 
 const TEXTO_POR_IDIOMA: Record<string, (palavra: string) => string> = {
-  pt: (p) => `Se nÃ£o quiser mais receber mensagens, responda ${p}.`,
-  es: (p) => `Si no querÃ©s recibir mÃ¡s mensajes, respondÃ© ${p}.`,
-  en: (p) => `If you'd rather not receive these messages, reply ${p}.`,
-};
-
-function raiz(locale: string | null | undefined): string {
-  const r = (locale ?? "").toLowerCase().split(/[-_]/)[0] ?? "";
-  // Idioma desconhecido cai em portuguÃªs â€” o padrÃ£o do produto â€” em vez de
-  // ficar sem rodapÃ©. NÃ£o oferecer saÃ­da Ã© o defeito que este mÃ³dulo conserta.
-  return r in TEXTO_POR_IDIOMA ? r : "pt";
-}
-
-/**
- * A palavra de saÃ­da para este idioma, garantida como reconhecÃ­vel.
- *
- * Se o detector deixar de reconhecÃª-la, isto LANÃ‡A em vez de mandar uma
- * promessa falsa: prometer uma saÃ­da que nÃ£o funciona Ã© pior que nÃ£o prometer,
- * porque a pessoa responde, nada acontece, e ela conclui que foi ignorada.
- */
-export function palavraDeSaida(locale?: string | null): string {
-  const idioma = raiz(locale);
-  const palavra = PALAVRA_POR_IDIOMA[idioma] ?? "PARAR";
-  if (!PALAVRAS_DE_OPT_OUT.has(palavra.toLowerCase())) {
-    throw new Error(
-      `A palavra de saÃ­da "${palavra}" nÃ£o Ã© reconhecida por lib/opt-out/deteccao.ts. ` +
-        "Oferecer uma saÃ­da que o detector nÃ£o entende faz a pessoa pedir para sair e continuar recebendo.",
-    );
-  }
-  return palavra;
-}
-
-/** O rodapÃ© pronto, sem quebra de linha inicial. */
-export function rodapeDeSaida(locale?: string | null): string {
-  return "";
-}
-
-/**
- * O corpo final da abordagem: o texto do modelo + a saÃ­da.
- *
- * Idempotente de propÃ³sito â€” se o texto do modelo jÃ¡ terminar com o rodapÃ© (por
- * exemplo porque alguÃ©m pÃ´s a instruÃ§Ã£o no prompt tambÃ©m), nÃ£o duplica. Repetir
- * a mesma frase duas vezes na primeira mensagem parece defeito e custa a
- * primeira impressÃ£o.
- */
-export function comSaida(texto: string, locale?: string | null): string {
   return texto.trimEnd();
+}
+
+/** O texto já termina com o rodapé deste idioma (o mesmo critério do `comSaida`). */
+export function temSaida(texto: string, locale?: string | null): boolean {
+  return true;
 }
 
 

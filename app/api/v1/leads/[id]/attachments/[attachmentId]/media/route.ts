@@ -15,6 +15,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { logger } from "@/lib/logger";
+import { isLeadAttachmentPathOwnedBy } from "@/lib/messaging/media/upload-validation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -29,7 +31,9 @@ interface RouteCtx {
 
 export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const requestId = randomUUID();
-  const authz = await requireRole("agent", { requestId, resource: "crm_leads" });
+  // A mídia é a LEITURA do anexo (#3431): o `viewer` que já vê o negócio abre o
+  // arquivo. Escrever segue em `agent`, na rota da lista (POST/DELETE).
+  const authz = await requireRole("viewer", { requestId, resource: "crm_leads" });
   if (!authz.ok) return authz.response;
   const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { org } = authz;
@@ -59,6 +63,11 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
 
   if (anexoErr) return fail("internal_error", t("Erro ao buscar anexo."), 500, { requestId });
   if (!anexo || !anexo.storage_path) {
+    return fail("not_found", t("Anexo não encontrado."), 404, { requestId });
+  }
+  // O link sai com o cliente admin: só assina o que mora sob o prefixo deste negócio.
+  if (!isLeadAttachmentPathOwnedBy(anexo.storage_path, org.orgId, lead.id)) {
+    logger.warn("[leads/attachments] caminho fora do negócio; link não assinado", { attachmentId, requestId });
     return fail("not_found", t("Anexo não encontrado."), 404, { requestId });
   }
 
